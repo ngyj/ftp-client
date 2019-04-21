@@ -98,6 +98,7 @@ data Handle = Handle
     , sendLine :: ByteString -> IO ()
     , recv :: Int -> IO ByteString
     , recvLine :: IO ByteString
+    , recvContents :: IO ByteString
     , security :: Security
     }
 
@@ -146,15 +147,20 @@ responseStatus cbs =
         Just ('5', _) -> Failure
         _ -> throw $ BadProtocolResponseException cbs
 
-data RTypeCode = TA | TI
+-- | Specifies the type of the data
+data RTypeCode = TA -- ^ ASCII
+               | TI -- ^ Binary
 
 serialzeRTypeCode :: RTypeCode -> String
 serialzeRTypeCode TA = "A"
 serialzeRTypeCode TI = "I"
 
+-- | Whether the client or the server specifies port number for data connection
 data PortActivity = Active | Passive
 
-data ProtType = P | C
+-- | Data channel protection level
+data ProtType = P -- ^ Private
+              | C -- ^ Clear
 
 -- | Commands according to the FTP specification
 data FTPCommand
@@ -203,11 +209,11 @@ serializeCommand (Acct acct)  = "ACCT " <> acct
 serializeCommand (RType rt)   = "TYPE " <> serialzeRTypeCode rt
 serializeCommand (Retr file)  = "RETR " <> file
 serializeCommand (Nlst [])    = "NLST"
-serializeCommand (Nlst args)  = "NLST " <> intercalate " " args
+serializeCommand (Nlst args)  = "NLST " <> unwords args
 serializeCommand (Port ha pn) = "PORT " <> formatPort ha pn
 serializeCommand (Stor loc)   = "STOR " <> loc
 serializeCommand (List [])    = "LIST"
-serializeCommand (List args)  = "LIST " <> intercalate " " args
+serializeCommand (List args)  = "LIST " <> unwords args
 serializeCommand (Rnfr from)  = "RNFR " <> from
 serializeCommand (Rnto to)    = "RNTO " <> to
 serializeCommand (Dele file)  = "DELE " <> file
@@ -376,6 +382,7 @@ sIOHandleImpl h = Handle
     , sendLine = C.hPutStrLn h
     , recv = C.hGetSome h
     , recvLine = C.hGetLine h
+    , recvContents = C.hGetContents h
     , security = Clear
     }
 
@@ -468,7 +475,7 @@ createSendDataCommand
     => Handle
     -> PortActivity
     -> FTPCommand
-    -> m (SIO.Handle)
+    -> m SIO.Handle
 createSendDataCommand h pa cmd = withDataSocket pa h $ \socket -> do
     resp <- sendCommand h cmd
     ensureSucessfulData h resp
@@ -505,12 +512,7 @@ getAllLineResp h = getAllLineResp' h []
 
 -- | Recieve all data and return it as a 'Data.ByteString.ByteString'
 recvAll :: (MonadIO m, MonadCatch m) => Handle -> m ByteString
-recvAll h = recvAll' ""
-    where
-        recvAll' bs = ( do
-            chunk <- liftIO $ recv h defaultChunkSize
-            recvAll' $ bs <> chunk)
-                `M.catchIOError` (\_ -> return bs)
+recvAll = liftIO . recvContents
 
 -- TLS connection
 
@@ -548,9 +550,14 @@ tlsHandleImpl c = Handle
     { send = connectionPut c
     , sendLine = connectionPut c . (<> "\n")
     , recv = connectionGet c
+    , recvContents = recvAll' ""
     , recvLine = connectionGetLine maxBound c
     , security = TLS
     }
+  where
+    recvAll' bs = (do chunk <- liftIO $ connectionGet c defaultChunkSize
+                      recvAll' $ bs <> chunk
+                  ) `M.catchIOError` (\_ -> return bs)
 
 withTLSHandle
     :: (MonadMask m, MonadIO m)
@@ -578,7 +585,7 @@ withFTPS
     -> Int
     -> (Handle -> FTPResponse -> m a)
     -> m a
-withFTPS host portNum = withTLSHandle host portNum
+withFTPS = withTLSHandle
 
 -- TLS data connection
 
@@ -739,7 +746,7 @@ auth h = sendCommandS h Auth
 -- Data commands
 
 sendType :: MonadIO m => RTypeCode -> ByteString -> Handle -> m ()
-sendType TA dat h = void $ mapM (sendCommandLine h) $ C.split '\n' dat
+sendType TA dat h = mapM_ (sendCommandLine h) $ C.split '\n' dat
 sendType TI dat h = liftIO $ send h dat
 
 withDataCommandSecurity
